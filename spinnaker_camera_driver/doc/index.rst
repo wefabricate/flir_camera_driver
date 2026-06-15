@@ -124,6 +124,90 @@ Subscribed:
 - ``~/control``: (only when ``enable_external_control`` is set to True)
   for external control exposure time and gain.
 
+Snapshot service
+----------------
+
+The driver advertises a ``~/snapshot`` service
+(type ``flir_camera_msgs/srv/Snapshot``) that applies an exposure time and gain,
+**verifies** the settings actually took effect, and returns the matching image
+in a single call. It is useful for on-demand, one-off captures with known
+exposure/gain, as opposed to the free-running ``~/image_raw`` stream.
+
+Request / response::
+
+   # request
+   float64 exposure_time   # microseconds; <= 0 means "leave unchanged"
+   float64 gain            # dB; NaN means "leave unchanged"
+   ---
+   # response
+   uint8 ERROR   = 0
+   uint8 SUCCESS = 1
+   uint8 result
+   sensor_msgs/Image image
+   sensor_msgs/CameraInfo camera_info
+
+Behavior:
+
+- **Implicit auto-off.** If ``exposure_time > 0`` the driver sets
+  ``exposure_auto`` to ``Off`` *before* setting the exposure time; if ``gain`` is
+  not NaN it sets ``gain_auto`` to ``Off`` before setting the gain. A request
+  field left at its "unchanged" sentinel leaves both that setting and its auto
+  mode untouched. The settings are applied through the same parameter mapping
+  used elsewhere, so the relevant entries (``exposure_auto``, ``exposure_time``,
+  ``gain_auto``, ``gain``) must exist in your camera config file.
+- **Verification (two layers, internal).** Verification decides internally
+  whether the call succeeds (reflected in ``result``); the measured values are
+  not echoed in the response. First, *write-time read-back*: the value the camera
+  reports after applying must match the request within ~2.5% or the call fails.
+  Second, *frame-level* (authoritative): the returned frame's own chunk metadata
+  (``exposureTime``/``gain``) must match the applied values within ~2.5%.
+- **Restore.** The prior ``exposure_auto`` / ``exposure_time`` /
+  ``gain_auto`` / ``gain`` are captured and restored after the snapshot
+  (best effort), so a snapshot does not permanently change your streaming
+  settings.
+- **Deterministic capture.** The returned frame is one captured strictly *after*
+  the request is applied: a frame-id fence discards frames that were already in
+  flight, and the frame's metadata is then verified, so the result is a fresh,
+  correct-settings frame without disturbing the live stream. If the camera is
+  already in software-trigger mode the snapshot fires one ``trigger_software``
+  command (``AcquisitionControl/TriggerSoftware``) to produce that frame;
+  otherwise (free-running) it takes the next frame. Per-snapshot toggling of the
+  camera's trigger mode on a live stream is intentionally avoided — it proved
+  unreliable in practice.
+
+Failure contract:
+
+  The server always sets ``result`` (``SUCCESS`` = 1 on success, ``ERROR`` = 0
+  on failure). On ANY failure (a required parameter missing from the config, a
+  setter out of tolerance, verification timeout, a trigger error, or the camera
+  not streaming) ``result`` is ``ERROR``, the returned ``image`` is **empty**
+  (``width == 0``, ``height == 0``, empty ``data``), ``camera_info`` is empty,
+  and the specific reason is logged at ``WARN``/``ERROR``. Clients should check
+  ``result == SUCCESS``.
+
+Preconditions:
+
+- The camera must be **streaming** (the node active, and — if
+  ``connect_while_subscribed`` is set — a subscriber present). If it is not
+  streaming the call fails immediately with a logged precondition rather than
+  toggling the stream underneath subscribers.
+- For full frame-level verification the camera must send **chunk data** for
+  exposure and gain: enable ``chunk_mode_active``, ``chunk_selector_exposure_time``
+  / ``chunk_enable_exposure_time`` and ``chunk_selector_gain`` /
+  ``chunk_enable_gain`` (the ``blackfly_s`` example enables these). If chunk data
+  is not populated, the driver logs a warning and falls back to write-time
+  read-back verification only.
+- ``snapshot_timeout`` (seconds, default 2.0) bounds how long verification waits
+  for a matching frame before failing.
+
+Example call from the command line::
+
+   ros2 service call /flir_camera/snapshot flir_camera_msgs/srv/Snapshot \
+       "{exposure_time: 5000.0, gain: 2.0}"
+
+A Python example client that also saves the returned image to disk is provided
+at ``scripts/snapshot_client.py``.
+
 Parameters
 ----------
 
@@ -189,6 +273,9 @@ files*, the driver has the following ROS parameters:
    don’t know it, put in anything you like and the driver will croak
    with an error message, telling you what cameras serial numbers are
    available
+-  ``snapshot_timeout``: how long [s] the ``~/snapshot`` service waits for a
+   frame whose metadata matches the requested exposure/gain before failing.
+   Default: 2.0. See `Snapshot service`_.
 -  ``use_ieee_1588``: use PTP (IEEE 1588) to set the ``header.stamp`` time
    stamp instead of system time. Note that you will still need to enable
    IEEE 1588 at the camera level, and enable time stamp "chunks". Default: false.
