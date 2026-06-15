@@ -250,6 +250,48 @@ std::string SpinnakerWrapperImpl::setInt(const std::string & nn, int val, int * 
   return (set_parameter<GenApi::CIntegerPtr, int>(nn, val, retVal, camera_, debug_));
 }
 
+std::string SpinnakerWrapperImpl::getEnum(const std::string & nodeName, std::string * retVal)
+{
+  Lock lock(cameraMutex_);
+  *retVal = "";
+  const auto np = genicam_utils::find_node(nodeName, camera_, debug_);
+  if (!np) {
+    return ("node " + nodeName + " not found!");
+  }
+  if (!np->IsValid()) {
+    return ("node " + nodeName + " exists but is not accessible!");
+  }
+  GenApi::CEnumerationPtr p = static_cast<GenApi::CEnumerationPtr>(*np);
+  if (!is_readable(p)) {
+    return ("node " + nodeName + " is not readable!");
+  }
+  auto ce = p->GetCurrentEntry();
+  if (!ce) {
+    return ("node " + nodeName + " current entry not readable!");
+  }
+  *retVal = ce->GetSymbolic().c_str();
+  return ("OK");
+}
+
+std::string SpinnakerWrapperImpl::getDouble(const std::string & nodeName, double * retVal)
+{
+  Lock lock(cameraMutex_);
+  *retVal = std::nan("");
+  const auto np = genicam_utils::find_node(nodeName, camera_, debug_);
+  if (!np) {
+    return ("node " + nodeName + " not found!");
+  }
+  if (!np->IsValid()) {
+    return ("node " + nodeName + " exists but is not accessible!");
+  }
+  if (!is_readable(*np)) {
+    return ("node " + nodeName + " is not readable!");
+  }
+  GenApi::CFloatPtr p = static_cast<GenApi::CFloatPtr>(*np);
+  *retVal = p->GetValue();
+  return ("OK");
+}
+
 std::string SpinnakerWrapperImpl::execute(const std::string & nn)
 {
   Lock lock(cameraMutex_);
@@ -335,12 +377,14 @@ void SpinnakerWrapperImpl::OnImageEvent(Spinnaker::ImagePtr imgPtr)
     float expTime = 0;
     float gain = 0;
     int64_t stamp = 0;
+    bool chunkValid = false;
 
     try {
       const Spinnaker::ChunkData & chunk = imgPtr->GetChunkData();
       expTime = chunk.GetExposureTime();
       gain = chunk.GetGain();
       stamp = chunk.GetTimestamp();
+      chunkValid = true;
     } catch (const Spinnaker::Exception & e) {
       // Without chunk data enabled there is no way to get e.g. the time stamps. Bad!
       // Spinnaker: Image does not contain chunk data. [-1001]
@@ -376,7 +420,7 @@ void SpinnakerWrapperImpl::OnImageEvent(Spinnaker::ImagePtr imgPtr)
       t, brightness, expTime, maxExpTime, gain, stamp, imgPtr->GetImageSize(),
       imgPtr->GetImageStatus(), imgPtr->GetData(), imgPtr->GetWidth(), imgPtr->GetHeight(),
       imgPtr->GetStride(), imgPtr->GetBitsPerPixel(), imgPtr->GetNumChannels(),
-      imgPtr->GetFrameID(), pixelFormat_, numIncompleteImages_));
+      imgPtr->GetFrameID(), pixelFormat_, numIncompleteImages_, chunkValid));
     const size_t fid = imgPtr->GetFrameID();
     if (lastFrameId_ != 0 && fid > lastFrameId_) {
       stats_.numberSkipped += fid - lastFrameId_ - 1;

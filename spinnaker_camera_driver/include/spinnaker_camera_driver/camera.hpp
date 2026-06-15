@@ -16,12 +16,14 @@
 #ifndef SPINNAKER_CAMERA_DRIVER__CAMERA_HPP_
 #define SPINNAKER_CAMERA_DRIVER__CAMERA_HPP_
 
+#include <atomic>
 #include <camera_info_manager/camera_info_manager.hpp>
 #include <deque>
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <diagnostic_updater/publisher.hpp>
 #include <flir_camera_msgs/msg/camera_control.hpp>
 #include <flir_camera_msgs/msg/image_meta_data.hpp>
+#include <flir_camera_msgs/srv/snapshot.hpp>
 #include <image_transport/image_transport.hpp>
 #include <limits>
 #include <map>
@@ -115,9 +117,14 @@ private:
   rcl_interfaces::msg::SetParametersResult parameterChanged(
     const std::vector<rclcpp::Parameter> & params);
   void controlCallback(const flir_camera_msgs::msg::CameraControl::UniquePtr msg);
+  void snapshotCallback(
+    const std::shared_ptr<flir_camera_msgs::srv::Snapshot::Request> req,
+    std::shared_ptr<flir_camera_msgs::srv::Snapshot::Response> res);
+  std::string mappedNode(const std::string & paramName) const;
   void updateStatus();
   void checkSubscriptions();
   void doPublish(const ImageConstPtr & im);
+  bool fillImageMsg(const ImageConstPtr & im, sensor_msgs::msg::Image & img);
   rclcpp::Logger get_logger() { return (rclcpp::get_logger(logName_)); }
 
   template <class T>
@@ -207,16 +214,31 @@ private:
   rclcpp::Node::OnSetParametersCallbackHandle::SharedPtr callbackHandle_;  // keep alive callbacks
   rclcpp::TimerBase::SharedPtr statusTimer_;
   rclcpp::TimerBase::SharedPtr checkSubscriptionsTimer_;
-  bool cameraStreaming_{false};
+  std::atomic<bool> cameraStreaming_{false};
   std::mutex mutex_;
   std::condition_variable cv_;
   std::deque<ImageConstPtr> bufferQueue_;
   size_t maxBufferQueueSize_{4};
+  // ----- snapshot service -----
+  double snapshotTimeout_{2.0};   // [s] verification wait budget
+  std::mutex snapshotCallMutex_;  // serializes concurrent ~/snapshot calls
+  // capture state below is guarded by mutex_ and signalled via snapshotCv_
+  std::condition_variable snapshotCv_;
+  bool snapshotActive_{false};
+  bool snapshotCheckExposure_{false};
+  bool snapshotCheckGain_{false};
+  double snapshotExposure_{0};  // applied exposure to match [us]
+  double snapshotGain_{0};      // applied gain to match [dB]
+  bool snapshotMetaMissing_{false};
+  ImageConstPtr snapshotImage_;
+  uint64_t latestFrameId_{0};       // most recent frame id seen (fence reference)
+  uint64_t snapshotArmFrameId_{0};  // a snapshot only accepts frames past this id
   std::shared_ptr<std::thread> thread_;
   bool keepRunning_{true};
   std::map<std::string, NodeInfo> parameterMap_;
   std::vector<std::string> parameterList_;  // remember original ordering
   rclcpp::Subscription<flir_camera_msgs::msg::CameraControl>::SharedPtr controlSub_;
+  rclcpp::Service<flir_camera_msgs::srv::Snapshot>::SharedPtr snapshotService_;
   uint32_t publishedCount_{0};
   uint32_t droppedCount_{0};
   uint32_t queuedCount_{0};

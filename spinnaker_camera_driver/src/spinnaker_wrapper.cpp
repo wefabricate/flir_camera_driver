@@ -96,6 +96,24 @@ std::string SpinnakerWrapper::setInt(const std::string & nodeName, int val, int 
   }
 }
 
+std::string SpinnakerWrapper::getEnum(const std::string & nodeName, std::string * retVal)
+{
+  try {
+    return (wrapperImpl_->getEnum(nodeName, retVal));
+  } catch (const Spinnaker::Exception & e) {
+    throw SpinnakerWrapper::Exception(e.what());
+  }
+}
+
+std::string SpinnakerWrapper::getDouble(const std::string & nodeName, double * retVal)
+{
+  try {
+    return (wrapperImpl_->getDouble(nodeName, retVal));
+  } catch (const Spinnaker::Exception & e) {
+    throw SpinnakerWrapper::Exception(e.what());
+  }
+}
+
 std::string SpinnakerWrapper::execute(const std::string & nodeName)
 {
   try {

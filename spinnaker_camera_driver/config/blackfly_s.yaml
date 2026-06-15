@@ -135,6 +135,11 @@ parameters:
     # valid values are "Line<0,1,2>", "UserOutput<0,1,2>", "Counter<0,1><Start/End>",
     # "LogicBlock<0,1>
     node: AcquisitionControl/TriggerSource
+  - name: trigger_software
+    # command node: fired by the snapshot service to capture a frame when
+    # trigger_mode is "On" (and trigger_source is "Software").
+    type: command
+    node: AcquisitionControl/TriggerSoftware
   - name: trigger_delay
     # value >= 9
     type: float

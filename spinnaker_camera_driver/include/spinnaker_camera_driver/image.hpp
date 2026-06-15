@@ -28,7 +28,7 @@ public:
     uint64_t t, int16_t brightness, uint32_t et, uint32_t maxEt, float gain, int64_t imgT,
     size_t imageSize, int status, const void * data, size_t w, size_t h, size_t stride,
     size_t bitsPerPixel, size_t numChan, uint64_t frameId, pixel_format::PixelFormat pixFmt,
-    size_t numIncomplete);
+    size_t numIncomplete, bool chunkValid = false);
 
   // ----- variables --
   uint64_t time_;
@@ -48,6 +48,7 @@ public:
   uint64_t frameId_;
   pixel_format::PixelFormat pixelFormat_;
   size_t numIncomplete_;
+  bool chunkValid_;  // true if exposure/gain chunk metadata was decoded for this frame
 
 private:
 };

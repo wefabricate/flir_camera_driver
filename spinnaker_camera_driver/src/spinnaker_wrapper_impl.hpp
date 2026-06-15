@@ -60,6 +60,8 @@ public:
   std::string setDouble(const std::string & nodeName, double val, double * retVal);
   std::string setInt(const std::string & nodeName, int val, int * retVal);
   std::string setBool(const std::string & nodeName, bool val, bool * retVal);
+  std::string getEnum(const std::string & nodeName, std::string * retVal);
+  std::string getDouble(const std::string & nodeName, double * retVal);
   std::string execute(const std::string & nodeName);
   void setDebug(bool b) { debug_ = b; }
   void setComputeBrightness(bool b) { computeBrightness_ = b; }

@@ -230,6 +230,11 @@ void Camera::makeSubscribers()
       node_parameters_interface_, node_topics_interface_, "~/" + topicPrefix_ + "control", 10,
       std::bind(&Camera::controlCallback, this, std::placeholders::_1));
   }
+  // created here (like controlSub_) to share the configure/cleanup lifecycle
+  snapshotService_ = rclcpp::create_service<flir_camera_msgs::srv::Snapshot>(
+    node_base_interface_, node_services_interface_, "~/" + topicPrefix_ + "snapshot",
+    std::bind(&Camera::snapshotCallback, this, std::placeholders::_1, std::placeholders::_2),
+    rmw_qos_profile_services_default, nullptr);
 }
 
 void Camera::startTimers()
@@ -435,6 +440,7 @@ void Camera::readParameters()
   parameterFile_ = safe_declare<std::string>(prefix_ + "parameter_file", "parameters.yaml");
   streamOnlyWhileSubscribed_ = safe_declare<bool>(prefix_ + "connect_while_subscribed", false);
   enableExternalControl_ = safe_declare<bool>(prefix_ + "enable_external_control", false);
+  snapshotTimeout_ = safe_declare<double>(prefix_ + "snapshot_timeout", 2.0);
   callbackHandle_ = node_parameters_interface_->add_on_set_parameters_callback(
     std::bind(&Camera::parameterChanged, this, std::placeholders::_1));
   cameraInfoURL_ = safe_declare<std::string>(prefix_ + "camerainfo_url", "");
@@ -690,6 +696,273 @@ void Camera::controlCallback(const flir_camera_msgs::msg::CameraControl::UniqueP
   }
 }
 
+// Like Camera::setDouble's ~2.5% read-back tolerance, with an absolute floor so
+// the band does not collapse near zero (gain ~0 dB) and absorbs the <1us uint32
+// exposure-chunk truncation.
+static bool within_tolerance(double a, double b, double absEps)
+{
+  return (std::abs(a - b) <= 0.025 * std::abs(a + b) + absEps);
+}
+
+// Spinnaker node path for a ROS param name, or "" if not in the camera config.
+std::string Camera::mappedNode(const std::string & paramName) const
+{
+  const auto it = parameterMap_.find(prefix_ + paramName);
+  return (it == parameterMap_.end() ? std::string() : it->second.name);
+}
+
+// ~/snapshot service handler; returns an empty image on any failure per the
+// Snapshot.srv contract. Runs on the executor thread while frames are produced
+// on the SDK thread and consumed by run(): mutex_ is held only to arm capture
+// and wait on snapshotCv_, never across a blocking Spinnaker call, so this
+// blocking handler cannot deadlock.
+void Camera::snapshotCallback(
+  const std::shared_ptr<flir_camera_msgs::srv::Snapshot::Request> req,
+  std::shared_ptr<flir_camera_msgs::srv::Snapshot::Response> res)
+{
+  res->result = flir_camera_msgs::srv::Snapshot::Response::ERROR;
+  res->image = sensor_msgs::msg::Image();
+  res->camera_info = sensor_msgs::msg::CameraInfo();
+
+  std::lock_guard<std::mutex> callGuard(snapshotCallMutex_);
+
+  // strong ref so a concurrent deconfigure() resetting wrapper_ can't null-deref us
+  const std::shared_ptr<spinnaker_camera_driver::SpinnakerWrapper> wrapper = wrapper_;
+  if (!wrapper) {
+    LOG_WARN("snapshot: camera not initialized");
+    return;
+  }
+  if (!cameraStreaming_) {
+    LOG_WARN(
+      "snapshot: camera is not streaming, cannot capture "
+      "(streaming is required; check connect_while_subscribed and that the node is active)");
+    return;
+  }
+
+  const double reqExp = req->exposure_time;
+  const double reqGain = req->gain;
+  const bool wantExposure = (reqExp > 0.0);
+  const bool wantGain = !std::isnan(reqGain);
+
+  // capture prior settings to restore after the snapshot
+  std::string priorExposureAuto, priorGainAuto;
+  double priorExposureTime = std::nan("");
+  double priorGain = std::nan("");
+  bool havePriorExposureTime = false;
+  bool havePriorGain = false;
+  bool changedExposure = false;
+  bool changedGain = false;
+
+  double appliedExposure = 0;
+  double appliedGain = 0;
+
+  bool ok = true;
+  try {
+    // ExposureAuto must be Off before ExposureTime is writable
+    if (wantExposure) {
+      const std::string autoNode = mappedNode("exposure_auto");
+      const std::string timeNode = mappedNode("exposure_time");
+      if (autoNode.empty() || timeNode.empty()) {
+        LOG_ERROR("snapshot: exposure_auto/exposure_time missing from camera config");
+        ok = false;
+      } else {
+        std::string a;
+        if (wrapper->getEnum(autoNode, &a) == "OK") {
+          priorExposureAuto = a;
+        }
+        double d;
+        if (wrapper->getDouble(timeNode, &d) == "OK") {
+          priorExposureTime = d;
+          havePriorExposureTime = true;
+        }
+        std::string retEnum;
+        changedExposure = true;
+        const std::string em = wrapper->setEnum(autoNode, "Off", &retEnum);
+        if (em != "OK" || retEnum != "Off") {
+          LOG_ERROR(
+            "snapshot: could not turn exposure_auto Off: " << em << " (got '" << retEnum << "')");
+          ok = false;
+        } else {
+          const std::string dm = wrapper->setDouble(timeNode, reqExp, &appliedExposure);
+          if (dm != "OK" || !within_tolerance(reqExp, appliedExposure, 1.0)) {
+            LOG_ERROR(
+              "snapshot: exposure_time " << reqExp << "us out of tolerance: " << dm << " (applied "
+                                         << appliedExposure << "us)");
+            ok = false;
+          }
+        }
+      }
+    }
+    // GainAuto must be Off before Gain is writable
+    if (ok && wantGain) {
+      const std::string autoNode = mappedNode("gain_auto");
+      const std::string gainNode = mappedNode("gain");
+      if (autoNode.empty() || gainNode.empty()) {
+        LOG_ERROR("snapshot: gain_auto/gain missing from camera config");
+        ok = false;
+      } else {
+        std::string a;
+        if (wrapper->getEnum(autoNode, &a) == "OK") {
+          priorGainAuto = a;
+        }
+        double d;
+        if (wrapper->getDouble(gainNode, &d) == "OK") {
+          priorGain = d;
+          havePriorGain = true;
+        }
+        std::string retEnum;
+        changedGain = true;
+        const std::string em = wrapper->setEnum(autoNode, "Off", &retEnum);
+        if (em != "OK" || retEnum != "Off") {
+          LOG_ERROR(
+            "snapshot: could not turn gain_auto Off: " << em << " (got '" << retEnum << "')");
+          ok = false;
+        } else {
+          const std::string dm = wrapper->setDouble(gainNode, reqGain, &appliedGain);
+          if (dm != "OK" || !within_tolerance(reqGain, appliedGain, 0.1)) {
+            LOG_ERROR(
+              "snapshot: gain " << reqGain << "dB out of tolerance: " << dm << " (applied "
+                                << appliedGain << "dB)");
+            ok = false;
+          }
+        }
+      }
+    }
+  } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+    LOG_ERROR("snapshot: spinnaker error while applying settings: " << e.what());
+    ok = false;
+  }
+
+  // Determinism comes from the frame-id fence in processImage, not from toggling
+  // trigger mode on a live stream (which proved unreliable). If the camera is
+  // already in trigger mode we fire one software trigger; otherwise we rely on
+  // the free-running stream.
+  bool fireTrigger = false;
+  std::string triggerSoftwareNode;
+  if (ok) {
+    const std::string tmNode = mappedNode("trigger_mode");
+    if (!tmNode.empty()) {
+      try {
+        std::string tm;
+        if (wrapper->getEnum(tmNode, &tm) == "OK" && tm == "On") {
+          fireTrigger = true;
+          triggerSoftwareNode = mappedNode("trigger_software");
+          if (triggerSoftwareNode.empty()) {
+            LOG_ERROR(
+              "snapshot: trigger_mode is On but no trigger_software command node in camera config");
+            ok = false;
+          }
+        }
+      } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+        LOG_WARN(
+          "snapshot: could not read trigger_mode (" << e.what() << "), assuming free-running");
+      }
+    }
+  }
+
+  ImageConstPtr matched;
+  bool metaMissing = false;
+  if (ok) {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      bufferQueue_.clear();
+      snapshotImage_.reset();
+      snapshotMetaMissing_ = false;
+      snapshotCheckExposure_ = wantExposure;
+      snapshotCheckGain_ = wantGain;
+      snapshotExposure_ = appliedExposure;
+      snapshotGain_ = appliedGain;
+      snapshotArmFrameId_ = latestFrameId_;
+      snapshotActive_ = true;
+    }
+    if (fireTrigger) {
+      try {
+        if (!execute(triggerSoftwareNode)) {
+          LOG_ERROR("snapshot: software trigger failed");
+          ok = false;
+        }
+      } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+        LOG_ERROR("snapshot: software trigger error: " << e.what());
+        ok = false;
+      }
+    }
+    if (ok) {
+      std::unique_lock<std::mutex> lock(mutex_);
+      const auto timeout = std::chrono::nanoseconds(static_cast<int64_t>(snapshotTimeout_ * 1e9));
+      snapshotCv_.wait_for(
+        lock, timeout, [this] { return snapshotImage_ != nullptr || !keepRunning_; });
+      matched = snapshotImage_;
+      metaMissing = snapshotMetaMissing_;
+    }
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      snapshotActive_ = false;
+      snapshotCheckExposure_ = false;
+      snapshotCheckGain_ = false;
+      snapshotImage_.reset();
+    }
+  }
+
+  if (ok && matched) {
+    if (metaMissing) {
+      LOG_WARN(
+        "snapshot: frame chunk metadata not populated; returned frame verified by write-time "
+        "read-back only. Enable chunk_enable_exposure_time and chunk_enable_gain for full "
+        "frame-level verification.");
+    }
+    const rclcpp::Time stamp(matched->time_);
+    sensor_msgs::msg::Image img(imageMsg_);  // carries frame_id
+    img.header.stamp = stamp;
+    if (fillImageMsg(matched, img)) {
+      res->result = flir_camera_msgs::srv::Snapshot::Response::SUCCESS;
+      res->image = img;
+      res->camera_info = cameraInfoMsg_;
+      res->camera_info.header.stamp = stamp;
+      LOG_INFO(
+        "snapshot: returned " << img.width << "x" << img.height << " " << img.encoding << " exp="
+                              << matched->exposureTime_ << "us gain=" << matched->gain_ << "dB");
+    } else {
+      LOG_ERROR("snapshot: failed to encode captured frame");
+    }
+  } else if (ok && !matched) {
+    LOG_WARN(
+      "snapshot: timed out after " << snapshotTimeout_
+                                   << "s waiting for a frame matching the request");
+  }
+
+  // restore prior streaming settings (best effort; runs on success or failure)
+  if (changedExposure || changedGain) {
+    try {
+      if (changedExposure) {
+        const std::string autoNode = mappedNode("exposure_auto");
+        const std::string timeNode = mappedNode("exposure_time");
+        if (havePriorExposureTime && !timeNode.empty()) {
+          double tmp;
+          wrapper->setDouble(timeNode, priorExposureTime, &tmp);
+        }
+        if (!priorExposureAuto.empty() && !autoNode.empty()) {
+          std::string tmp;
+          wrapper->setEnum(autoNode, priorExposureAuto, &tmp);
+        }
+      }
+      if (changedGain) {
+        const std::string autoNode = mappedNode("gain_auto");
+        const std::string gainNode = mappedNode("gain");
+        if (havePriorGain && !gainNode.empty()) {
+          double tmp;
+          wrapper->setDouble(gainNode, priorGain, &tmp);
+        }
+        if (!priorGainAuto.empty() && !autoNode.empty()) {
+          std::string tmp;
+          wrapper->setEnum(autoNode, priorGainAuto, &tmp);
+        }
+      }
+    } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+      LOG_WARN("snapshot: failed to restore prior settings: " << e.what());
+    }
+  }
+}
+
 void Camera::processImage(const ImageConstPtr & im)
 {
   {
@@ -703,6 +976,30 @@ void Camera::processImage(const ImageConstPtr & im)
     }
     if (imageArrivalDiagnostic_) {
       imageArrivalDiagnostic_->tick();
+    }
+    latestFrameId_ = im->frameId_;
+    // frame-id fence: only consider frames captured after the snapshot was armed,
+    // so a stale pre-settings frame can't be returned
+    if (
+      snapshotActive_ && !snapshotImage_ &&
+      (im->frameId_ == 0 || im->frameId_ > snapshotArmFrameId_)) {
+      // no chunk metadata: fall back to write-time read-back verification
+      bool matches = true;
+      if (!im->chunkValid_) {
+        snapshotMetaMissing_ = true;
+      } else {
+        if (snapshotCheckExposure_) {
+          matches = matches && within_tolerance(
+                                 static_cast<double>(im->exposureTime_), snapshotExposure_, 1.0);
+        }
+        if (snapshotCheckGain_) {
+          matches = matches && within_tolerance(static_cast<double>(im->gain_), snapshotGain_, 0.1);
+        }
+      }
+      if (matches) {
+        snapshotImage_ = im;
+        snapshotCv_.notify_all();
+      }
     }
   }
 }
@@ -796,6 +1093,20 @@ rclcpp::Time Camera::getAdjustedTimeStamp(uint64_t t, int64_t sensorTime)
   return (adjustedTime);
 }
 
+// Fill encoding + pixel data; false if the pixel format has no ROS encoding.
+bool Camera::fillImageMsg(const ImageConstPtr & im, sensor_msgs::msg::Image & img)
+{
+  bool canEncode{false};
+  const std::string encoding = flir_to_ros_encoding(im->pixelFormat_, &canEncode);
+  if (!canEncode) {
+    LOG_WARN(
+      "no ROS encoding for pixel format "
+      << spinnaker_camera_driver::pixel_format::to_string(im->pixelFormat_));
+    return (false);
+  }
+  return (sensor_msgs::fillImage(img, encoding, im->height_, im->width_, im->stride_, im->data_));
+}
+
 void Camera::doPublish(const ImageConstPtr & im)
 {
   rclcpp::Time t;
@@ -825,28 +1136,15 @@ void Camera::doPublish(const ImageConstPtr & im)
   cameraInfoMsg_.header.stamp = t;
 
   if (pub_.getNumSubscribers() > 0) {
-    bool canEncode{false};
-    const std::string encoding = flir_to_ros_encoding(im->pixelFormat_, &canEncode);
-    if (!canEncode) {
-      LOG_WARN(
-        "no ROS encoding for pixel format "
-        << spinnaker_camera_driver::pixel_format::to_string(im->pixelFormat_));
-      return;
-    }
-
-    sensor_msgs::msg::CameraInfo::UniquePtr cinfo(new sensor_msgs::msg::CameraInfo(cameraInfoMsg_));
     // will make deep copy. Do we need to? Probably...
     sensor_msgs::msg::Image::UniquePtr img(new sensor_msgs::msg::Image(imageMsg_));
-    bool ret =
-      sensor_msgs::fillImage(*img, encoding, im->height_, im->width_, im->stride_, im->data_);
-    if (!ret) {
-      LOG_ERROR("fill image failed!");
-    } else {
-      // const auto t0 = node_->now();
+    if (fillImageMsg(im, *img)) {
+      sensor_msgs::msg::CameraInfo::UniquePtr cinfo(
+        new sensor_msgs::msg::CameraInfo(cameraInfoMsg_));
       pub_.publish(std::move(img), std::move(cinfo));
-      // const auto t1 = node_->now();
-      // std::cout << "dt: " << (t1 - t0).nanoseconds() * 1e-9 << std::endl;
       publishedCount_++;
+    } else {
+      LOG_ERROR("fill image failed!");
     }
   }
   if (metaPub_->get_subscription_count() != 0) {
@@ -886,6 +1184,7 @@ bool Camera::deactivate()
     std::unique_lock<std::mutex> lock(mutex_);
     keepRunning_ = false;
     cv_.notify_all();
+    snapshotCv_.notify_all();  // release any in-flight snapshot waiter
   }
   if (thread_) {
     thread_->join();
@@ -902,7 +1201,11 @@ bool Camera::deconfigure()
   return (true);
 }
 
-void Camera::destroySubscribers() { controlSub_.reset(); }
+void Camera::destroySubscribers()
+{
+  controlSub_.reset();
+  snapshotService_.reset();
+}
 
 void Camera::destroyPublishers()
 {
