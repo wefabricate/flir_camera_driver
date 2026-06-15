@@ -1,0 +1,14 @@
+# Snapshot service: apply exposure/gain, then return one verified image.
+# Server MUST set `result`. Empty image on failure.
+
+# request
+float64 exposure_time   # microseconds; <= 0 means "leave unchanged"
+float64 gain            # dB; NaN means "leave unchanged"
+---
+# response
+uint8 ERROR   = 0
+uint8 SUCCESS = 1
+
+uint8 result
+sensor_msgs/Image image
+sensor_msgs/CameraInfo camera_info
