@@ -17,17 +17,21 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <image_transport/image_transport.hpp>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sensor_msgs/fill_image.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <spinnaker_camera_driver/camera_driver.hpp>
 #include <spinnaker_camera_driver/exposure_controller.hpp>
 #include <spinnaker_camera_driver/logging.hpp>
 #include <type_traits>
+#include <vector>
 
 namespace spinnaker_camera_driver
 {
@@ -1034,6 +1038,22 @@ void Camera::snapshotCallback(
   }
 }
 
+// Image::data_ only points into the SDK frame buffer; deep-copy into an owned
+// buffer (lifetime tied to the Image via a custom deleter) so it survives the
+// EndAcquisition() in captureViaStopTrigger's teardown.
+static Camera::ImageConstPtr copyImagePixels(const Camera::ImageConstPtr & src)
+{
+  if (!src || !src->data_) {
+    return src;
+  }
+  const size_t nbytes = src->height_ * src->stride_;
+  auto buf = std::make_shared<std::vector<uint8_t> >(nbytes);
+  std::memcpy(buf->data(), src->data_, nbytes);
+  auto * copy = new Image(*src);
+  copy->data_ = buf->data();  // point at the owned copy
+  return Camera::ImageConstPtr(copy, [buf](const Image * p) { delete p; });
+}
+
 // Stops the live stream, arms a software trigger, fires one trigger, waits for
 // the resulting (post-settings) frame, then ALWAYS restores free-running
 // streaming. Reuses processImage + snapshotCv_ to receive the frame, exactly
@@ -1124,6 +1144,11 @@ Camera::ImageConstPtr Camera::captureViaStopTrigger(
     }
   } else {
     *ok = false;
+  }
+
+  // copy the pixels while acquisition is still live; the teardown below frees the SDK buffer
+  if (matched) {
+    matched = copyImagePixels(matched);
   }
 
   // 6) teardown: ALWAYS return the camera to free-running streaming. stopStreaming

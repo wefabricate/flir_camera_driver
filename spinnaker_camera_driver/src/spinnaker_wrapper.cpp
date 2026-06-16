@@ -15,16 +15,51 @@
 
 #include <Spinnaker.h>
 
+#include <chrono>
+#include <functional>
+#include <spinnaker_camera_driver/logging.hpp>
 #include <spinnaker_camera_driver/spinnaker_wrapper.hpp>
 #include <string>
+#include <thread>
 
 #include "./spinnaker_wrapper_impl.hpp"
 
 namespace spinnaker_camera_driver
 {
-SpinnakerWrapper::SpinnakerWrapper(rclcpp::Logger logger)
+// transient GigE transport errors that clear on a retry, unlike deterministic
+// errors (out-of-range, invalid value) which must not be retried
+static bool isTransientTransportError(const Spinnaker::Exception & e)
+{
+  const auto code = e.GetError();
+  return code == Spinnaker::SPINNAKER_ERR_IO || code == Spinnaker::SPINNAKER_ERR_TIMEOUT;
+}
+
+SpinnakerWrapper::SpinnakerWrapper(rclcpp::Logger logger) : logger_(logger)
 {
   wrapperImpl_.reset(new SpinnakerWrapperImpl(logger));
+}
+
+// fn() must be idempotent: a retry re-runs the whole impl call, re-issuing any
+// write. Only absolute-value sets are routed here; command nodes use execute().
+std::string SpinnakerWrapper::callWithRetry(
+  const std::string & op, const std::function<std::string()> & fn)
+{
+  const int maxAttempts = 4;
+  for (int attempt = 1;; ++attempt) {
+    try {
+      return fn();
+    } catch (const Spinnaker::Exception & e) {
+      if (isTransientTransportError(e) && attempt < maxAttempts) {
+        LOG_WARN(
+          "transient device I/O on " << op << " (attempt " << attempt << "/" << maxAttempts
+                                     << "), retrying: " << e.what());
+        // impl call has returned, so cameraMutex_ is not held during the backoff
+        std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
+        continue;
+      }
+      throw SpinnakerWrapper::Exception(e.what());
+    }
+  }
 }
 
 std::string SpinnakerWrapper::getLibraryVersion() const
@@ -62,58 +97,41 @@ std::string SpinnakerWrapper::getNodeMapAsString() { return (wrapperImpl_->getNo
 std::string SpinnakerWrapper::setEnum(
   const std::string & nodeName, const std::string & val, std::string * retVal)
 {
-  try {
-    return (wrapperImpl_->setEnum(nodeName, val, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "setEnum(" + nodeName + ")", [&] { return wrapperImpl_->setEnum(nodeName, val, retVal); });
 }
 
 std::string SpinnakerWrapper::setDouble(const std::string & nodeName, double val, double * retVal)
 {
-  try {
-    return (wrapperImpl_->setDouble(nodeName, val, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "setDouble(" + nodeName + ")", [&] { return wrapperImpl_->setDouble(nodeName, val, retVal); });
 }
 
 std::string SpinnakerWrapper::setBool(const std::string & nodeName, bool val, bool * retVal)
 {
-  try {
-    return (wrapperImpl_->setBool(nodeName, val, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "setBool(" + nodeName + ")", [&] { return wrapperImpl_->setBool(nodeName, val, retVal); });
 }
 
 std::string SpinnakerWrapper::setInt(const std::string & nodeName, int val, int * retVal)
 {
-  try {
-    return (wrapperImpl_->setInt(nodeName, val, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "setInt(" + nodeName + ")", [&] { return wrapperImpl_->setInt(nodeName, val, retVal); });
 }
 
 std::string SpinnakerWrapper::getEnum(const std::string & nodeName, std::string * retVal)
 {
-  try {
-    return (wrapperImpl_->getEnum(nodeName, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "getEnum(" + nodeName + ")", [&] { return wrapperImpl_->getEnum(nodeName, retVal); });
 }
 
 std::string SpinnakerWrapper::getDouble(const std::string & nodeName, double * retVal)
 {
-  try {
-    return (wrapperImpl_->getDouble(nodeName, retVal));
-  } catch (const Spinnaker::Exception & e) {
-    throw SpinnakerWrapper::Exception(e.what());
-  }
+  return callWithRetry(
+    "getDouble(" + nodeName + ")", [&] { return wrapperImpl_->getDouble(nodeName, retVal); });
 }
 
+// not retried: execute() fires command nodes (e.g. TriggerSoftware) a retry could double-fire
 std::string SpinnakerWrapper::execute(const std::string & nodeName)
 {
   try {

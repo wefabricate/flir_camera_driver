@@ -86,7 +86,11 @@ public:
   std::string execute(const std::string & nodeName);
 
 private:
+  // retry fn() on transient GigE transport errors; fn() must be idempotent
+  std::string callWithRetry(const std::string & op, const std::function<std::string()> & fn);
+  rclcpp::Logger get_logger() const { return logger_; }
   // ----- variables --
+  rclcpp::Logger logger_;
   std::shared_ptr<SpinnakerWrapperImpl> wrapperImpl_;
 };
 }  // namespace spinnaker_camera_driver
