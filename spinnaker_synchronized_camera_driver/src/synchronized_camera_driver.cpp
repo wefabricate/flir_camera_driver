@@ -29,8 +29,13 @@ namespace spinnaker_synchronized_camera_driver
 SynchronizedCameraDriver::SynchronizedCameraDriver(const rclcpp::NodeOptions & options)
 : NodeType("sync_cam_driver", options), timeEstimator_(new TimeEstimator())
 {
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
+  // The image_transport publisher is only usable on a lifecycle node from
+  // image_transport >= 6.4.0. When available, build the ImageTransport from the
+  // node interfaces and hand it to each Camera. Otherwise leave it null: the
+  // cameras then publish via plain lifecycle publishers (see Camera::makePublishers).
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
   imageTransport_ = std::make_shared<ImageTransport>(image_transport::RequiredInterfaces(*this));
+#endif
   get_node_base_interface()->get_context()->add_pre_shutdown_callback(
     std::bind(&SynchronizedCameraDriver::preShutdown, this));
   if (declare_parameter("auto_start", true)) {
@@ -41,13 +46,6 @@ SynchronizedCameraDriver::SynchronizedCameraDriver(const rclcpp::NodeOptions & o
       rclcpp_lifecycle::LifecycleNode::activate();
     });
   }
-#else
-  imageTransport_ = std::make_shared<ImageTransport>(
-    std::shared_ptr<SynchronizedCameraDriver>(this, [](auto *) {}));
-  if (configure()) {
-    activate();
-  }
-#endif
 }
 
 SynchronizedCameraDriver::~SynchronizedCameraDriver() { shutdown(); }
@@ -187,14 +185,10 @@ bool SynchronizedCameraDriver::createCameras()
   }
   for (size_t i = 0; i < cameras.size(); i++) {
     const auto & c = cameras[i];
-#ifdef IMAGE_TRANSPORT_SUPPORTS_NODE_INTERFACES
+    // Always use the node-interfaces overload: a LifecycleNode has node interfaces.
     auto mgr = spinnaker_camera_driver::utils::makeCameraInfoManager(
       get_node_base_interface(), get_node_parameters_interface(), get_node_logging_interface(),
       get_node_services_interface(), c, c + ".camerainfo_url", 10);
-#else
-    auto mgr =
-      spinnaker_camera_driver::utils::makeCameraInfoManager(this, c, c + ".camerainfo_url");
-#endif
     infoManagers_.push_back(mgr);
     auto cam = std::make_shared<spinnaker_camera_driver::Camera>(
       get_node_base_interface(), get_node_parameters_interface(), get_node_logging_interface(),
@@ -247,8 +241,6 @@ bool SynchronizedCameraDriver::update(
   const bool gotTime = timeEstimator_->update(idx, hostTime, frameTime);
   return (gotTime);
 }
-
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
 
 void SynchronizedCameraDriver::preShutdown()
 {
@@ -312,7 +304,6 @@ CbReturn SynchronizedCameraDriver::on_error(const LCState & state)
   LOG_ERROR("got error state: " << state.label());
   return (CbReturn::FAILURE);
 }
-#endif
 
 }  // namespace spinnaker_synchronized_camera_driver
 

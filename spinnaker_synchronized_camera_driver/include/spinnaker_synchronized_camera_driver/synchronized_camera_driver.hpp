@@ -44,8 +44,9 @@ public:
   ~SynchronizedCameraDriver();
   bool update(size_t idx, uint64_t hostTime, double dt, uint64_t * frameTime);
 
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
 protected:
+  // The node is always a lifecycle node now, so the lifecycle callbacks are
+  // always compiled (the image_transport version only selects the publisher).
   void preShutdown();
   CbReturn on_configure(const LCState & state) override;
   CbReturn on_activate(const LCState & state) override;
@@ -53,7 +54,6 @@ protected:
   CbReturn on_cleanup(const LCState & state) override;
   CbReturn on_shutdown(const LCState & state) override;
   CbReturn on_error(const LCState & state) override;
-#endif
 
 private:
   bool createCameras();

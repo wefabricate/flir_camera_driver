@@ -41,6 +41,7 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_ros REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 
 if(${image_transport_VERSION} VERSION_GREATER_EQUAL "6.4.0")
   add_definitions(-DIMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE)
@@ -49,7 +50,8 @@ endif()
 
 set(ROS_DEPENDENCIES
   rclcpp::rclcpp
-  rclcpp_components::component)
+  rclcpp_components::component
+  rclcpp_lifecycle::rclcpp_lifecycle)
 
 #
 # shared library for composable node
