@@ -601,7 +601,26 @@ void SpinnakerWrapperImpl::monitorStatus()
         .count();
     if (t_now - lastTime_ > acquisitionTimeout_ && keepRunning_) {
       Lock lock(cameraMutex_);
+      // In trigger mode the camera only delivers a frame per trigger, so a gap
+      // longer than acquisitionTimeout_ between frames is EXPECTED, not a fault.
+      // Restarting acquisition here would race with an in-flight software trigger
+      // and drop the snapshot's frame (turning every snapshot after the first into
+      // a verification timeout), so the watchdog stands down while triggered. We
+      // already hold cameraMutex_, so read TriggerMode off the node map directly
+      // rather than via getEnum() (which would re-lock and deadlock).
+      bool triggerModeOn = false;
       if (camera_) {
+        try {
+          GenApi::CEnumerationPtr triggerMode = camera_->GetNodeMap().GetNode("TriggerMode");
+          if (is_readable(triggerMode)) {
+            GenApi::CEnumEntryPtr cur = triggerMode->GetCurrentEntry();
+            triggerModeOn = cur && std::string(cur->GetSymbolic().c_str()) == "On";
+          }
+        } catch (const Spinnaker::Exception & e) {
+          // can't read trigger mode: fall back to the original restart behavior
+        }
+      }
+      if (camera_ && !triggerModeOn) {
         LOG_WARN("Acquisition timeout, restarting streaming!");
         try {
           try {
@@ -619,9 +638,12 @@ void SpinnakerWrapperImpl::monitorStatus()
         } catch (const Spinnaker::Exception & e) {
           LOG_WARN("restart attempt failed with error: " << e.what());
         }
+        stats_.acquisitionTimeouts++;
+        stats_.acquisitionError = true;
+      } else {
+        // either no camera or an expected trigger-mode idle gap: not an error
+        stats_.acquisitionError = false;
       }
-      stats_.acquisitionTimeouts++;
-      stats_.acquisitionError = true;
     } else {
       stats_.acquisitionError = false;
     }
