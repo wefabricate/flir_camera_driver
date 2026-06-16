@@ -8,6 +8,7 @@ find_dependency(image_transport)
 find_dependency(sensor_msgs)
 find_dependency(rclcpp)
 find_dependency(rclcpp_components)
+find_dependency(rclcpp_lifecycle)
 find_dependency(std_msgs)
 
 # Add the targets file

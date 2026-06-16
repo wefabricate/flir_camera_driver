@@ -115,9 +115,26 @@ Topics
 
 Published:
 
-- ``~/image_raw``: the camera image (image_transport)
-- ``~/image_raw/camera_info``: camera calibration
+- ``~/image_raw``: the camera image. With the image_transport publisher
+  (``image_transport`` >= 6.4.0) the usual transport plug-ins (e.g.
+  ``~/image_raw/compressed``, ``.../theora``) are also advertised; with the
+  fallback publisher it is a plain ``sensor_msgs/Image`` with no extra transports.
+- ``~/image_raw/camera_info``: camera calibration (same topic name under both
+  publishers).
 - ``~/meta``: meta data message containing e.g. exposure time.
+
+Image publisher
+~~~~~~~~~~~~~~~~
+
+The node is always a lifecycle node. When ``image_transport`` is new enough to
+attach to a lifecycle node (>= 6.4.0) the driver uses an
+``image_transport::CameraPublisher`` (raw + compressed/theora transports). On
+older ``image_transport`` it falls back to plain lifecycle publishers for raw
+``~/image_raw`` (``sensor_msgs/Image``) and ``~/image_raw/camera_info``
+(``sensor_msgs/CameraInfo``); the compressed/theora transports are not available
+in that case, but the topic names are the same. Both publishers respect the
+node's active/inactive state and the ``connect_while_subscribed``
+stream-on-demand behavior identically.
 
 Subscribed:
 
@@ -264,7 +281,9 @@ files*, the driver has the following ROS parameters:
    are present*. This feature reduces compute load and link utilization
    while no ROS subscribers are present, but adds latency on
    subscription: after a subscription the first image will be published up to 1s later
-   than without this option.
+   than without this option. Subscribers are counted on both the image topic
+   and the ``~/meta`` topic, and the gate works the same under either image
+   publisher. Default: false (stream continuously while the node is active).
 -  ``diagnostic_incompletes_warn``: number of incomplete frames per diagnostic update period
    before changing status to ``warning``.
 -  ``diagnostic_incompletes_error``: number of incomplete frames per diagnostic update period

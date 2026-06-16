@@ -188,11 +188,24 @@ bool Camera::configure()
 
 bool Camera::activate()
 {
+#ifndef USE_IMAGE_TRANSPORT_PUBLISHER
+  // LifecyclePublishers only emit while activated. The image_transport path is
+  // managed by image_transport via the node's own activate transition.
+  if (imagePub_) {
+    imagePub_->on_activate();
+  }
+  if (cameraInfoPub_) {
+    cameraInfoPub_->on_activate();
+  }
+#endif
   startTimers();  // must wait until publishers are created
   keepRunning_ = true;
   thread_ = std::make_shared<std::thread>(&Camera::run, this);
   if (!streamOnlyWhileSubscribed_) {
     if (!startStreaming()) {
+      // a failed activate transition does not trigger deactivate(), so undo the
+      // timers, run thread, and publisher activation we just set up before failing
+      deactivate();
       return (false);
     }
   }
@@ -210,6 +223,7 @@ bool Camera::startStreaming()
     } else {
       startDiagnostics();
       printCameraInfo();
+      LOG_INFO("started camera stream");
     }
   }
   return (true);
@@ -220,7 +234,26 @@ void Camera::makePublishers()
   metaPub_ = rclcpp::create_publisher<flir_camera_msgs::msg::ImageMetaData>(
     node_parameters_interface_, node_topics_interface_, "~/" + topicPrefix_ + "meta",
     rclcpp::QoS(1));
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
   pub_ = imageTransport_->advertiseCamera("~/" + topicPrefix_ + "image_raw", qosDepth_);
+#else
+  // No image_transport: publish raw Image + CameraInfo on plain lifecycle
+  // publishers. They are activated/deactivated alongside the camera in
+  // activate()/deactivate(), so they only emit while the node is active.
+  imagePub_ = rclcpp::create_publisher<
+    sensor_msgs::msg::Image, std::allocator<void>,
+    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image> >(
+    node_parameters_interface_, node_topics_interface_, "~/" + topicPrefix_ + "image_raw",
+    rclcpp::QoS(qosDepth_));
+  // CameraInfo on ~/image_raw/camera_info to match the image_transport convention
+  // (and the topic name the image_transport publisher path uses), so downstream
+  // subscribers see the same camera_info topic regardless of which publisher is built.
+  cameraInfoPub_ = rclcpp::create_publisher<
+    sensor_msgs::msg::CameraInfo, std::allocator<void>,
+    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CameraInfo> >(
+    node_parameters_interface_, node_topics_interface_,
+    "~/" + topicPrefix_ + "image_raw/camera_info", rclcpp::QoS(qosDepth_));
+#endif
 }
 
 void Camera::makeSubscribers()
@@ -324,6 +357,7 @@ bool Camera::stopStreaming()
     if (wrapper_->stopCamera()) {
       cameraStreaming_ = false;
       stopDiagnostics();
+      LOG_INFO("stopped camera stream");
       return (true);
     }
   }
@@ -390,10 +424,25 @@ void Camera::updateStatus()
   }
 }
 
+size_t Camera::imageSubscriberCount() const
+{
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
+  return (pub_.getNumSubscribers());
+#else
+  // Mirror image_transport::CameraPublisher::getNumSubscribers(), which is the
+  // max over the image and camera_info subscribers, so a calibration-only
+  // consumer still receives data (and, with connect_while_subscribed, keeps the
+  // stream alive) just as it would on the image_transport path.
+  const size_t imgSubs = imagePub_ ? imagePub_->get_subscription_count() : 0;
+  const size_t infoSubs = cameraInfoPub_ ? cameraInfoPub_->get_subscription_count() : 0;
+  return (std::max(imgSubs, infoSubs));
+#endif
+}
+
 void Camera::checkSubscriptions()
 {
   if (streamOnlyWhileSubscribed_) {
-    if (pub_.getNumSubscribers() > 0 || metaPub_->get_subscription_count() != 0) {
+    if (imageSubscriberCount() > 0 || metaPub_->get_subscription_count() != 0) {
       if (!cameraStreaming_) {
         startStreaming();
       }
@@ -1270,13 +1319,19 @@ void Camera::doPublish(const ImageConstPtr & im)
   imageMsg_.header.stamp = t;
   cameraInfoMsg_.header.stamp = t;
 
-  if (pub_.getNumSubscribers() > 0) {
+  if (imageSubscriberCount() > 0) {
     // will make deep copy. Do we need to? Probably...
     sensor_msgs::msg::Image::UniquePtr img(new sensor_msgs::msg::Image(imageMsg_));
     if (fillImageMsg(im, *img)) {
       sensor_msgs::msg::CameraInfo::UniquePtr cinfo(
         new sensor_msgs::msg::CameraInfo(cameraInfoMsg_));
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
       pub_.publish(std::move(img), std::move(cinfo));
+#else
+      // No image_transport: publish Image and CameraInfo on their own topics.
+      imagePub_->publish(std::move(img));
+      cameraInfoPub_->publish(std::move(cinfo));
+#endif
       publishedCount_++;
     } else {
       LOG_ERROR("fill image failed!");
@@ -1325,6 +1380,15 @@ bool Camera::deactivate()
     thread_->join();
     thread_.reset();
   }
+#ifndef USE_IMAGE_TRANSPORT_PUBLISHER
+  // Stop emitting now that the run thread is joined; mirrors on_activate above.
+  if (imagePub_) {
+    imagePub_->on_deactivate();
+  }
+  if (cameraInfoPub_) {
+    cameraInfoPub_->on_deactivate();
+  }
+#endif
   return (true);
 }
 
@@ -1345,7 +1409,12 @@ void Camera::destroySubscribers()
 void Camera::destroyPublishers()
 {
   metaPub_.reset();
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
   pub_.shutdown();
+#else
+  imagePub_.reset();
+  cameraInfoPub_.reset();
+#endif
 }
 
 void Camera::startDiagnostics()

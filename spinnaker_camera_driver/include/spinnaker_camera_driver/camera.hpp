@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <spinnaker_camera_driver/diagnostic_levels.hpp>
@@ -133,6 +134,11 @@ private:
   std::string mappedNode(const std::string & paramName) const;
   void updateStatus();
   void checkSubscriptions();
+  // Number of subscribers on the image topic, across both publisher paths
+  // (image_transport CameraPublisher or the fallback lifecycle image publisher).
+  // Used by the publish gate and by checkSubscriptions() so stream-on-demand
+  // behaves identically regardless of which publisher is compiled in.
+  size_t imageSubscriberCount() const;
   void doPublish(const ImageConstPtr & im);
   bool fillImageMsg(const ImageConstPtr & im, sensor_msgs::msg::Image & img);
   rclcpp::Logger get_logger() { return (rclcpp::get_logger(logName_)); }
@@ -190,7 +196,15 @@ private:
   std::shared_ptr<rclcpp::node_interfaces::NodeServicesInterface> node_services_interface_;
   image_transport::ImageTransport * imageTransport_{nullptr};
   camera_info_manager::CameraInfoManager * infoManager_{nullptr};
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
+  // image_transport publisher (raw + compressed/theora transports, CameraInfo bundled)
   image_transport::CameraPublisher pub_;
+#else
+  // Fallback when image_transport cannot attach to a lifecycle node: plain
+  // lifecycle publishers for raw Image + CameraInfo (no compressed/theora).
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image>::SharedPtr imagePub_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CameraInfo>::SharedPtr cameraInfoPub_;
+#endif
   rclcpp::Publisher<flir_camera_msgs::msg::ImageMetaData>::SharedPtr metaPub_;
   std::string serial_;
   std::string logName_;
@@ -230,7 +244,7 @@ private:
   std::deque<ImageConstPtr> bufferQueue_;
   size_t maxBufferQueueSize_{4};
   // ----- snapshot service -----
-  double snapshotTimeout_{2.0};   // [s] verification wait budget
+  double snapshotTimeout_{2.0};  // [s] verification wait budget
   // When true, a snapshot on a free-running camera STOPS the stream, switches to
   // a software trigger, captures one triggered frame, then resumes streaming
   // (deterministic, but ~0.4-0.5s of GigE stop/start latency per call). When

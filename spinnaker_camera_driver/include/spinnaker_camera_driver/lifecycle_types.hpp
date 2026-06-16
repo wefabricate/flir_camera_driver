@@ -17,16 +17,23 @@
 #define SPINNAKER_CAMERA_DRIVER__LIFECYCLE_TYPES_HPP_
 
 #include <rclcpp/rclcpp.hpp>
-
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp>
+
+// The driver node is ALWAYS a lifecycle node, independent of the image_transport
+// version. The image_transport version only decides which PUBLISHER is used.
 using NodeType = rclcpp_lifecycle::LifecycleNode;
 using LCState = rclcpp_lifecycle::State;
 using CbReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-#else
-using NodeType = rclcpp::Node;
+// Publisher-selection guard: the image_transport publisher can only attach to a
+// lifecycle node from image_transport >= 6.4.0, which is exactly when the build
+// defines IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE (see CMakeLists.txt). Alias it
+// to a name that reads as a publisher choice rather than a node-type choice.
+// When it is NOT defined, the driver falls back to plain lifecycle publishers
+// for sensor_msgs/Image (+ CameraInfo), with no image_transport involved.
+#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
+#define USE_IMAGE_TRANSPORT_PUBLISHER
 #endif
 
 #endif  // SPINNAKER_CAMERA_DRIVER__LIFECYCLE_TYPES_HPP_

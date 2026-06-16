@@ -25,21 +25,25 @@ namespace spinnaker_camera_driver
 CameraDriver::CameraDriver(const rclcpp::NodeOptions & options) : NodeType("camera_driver", options)
 {
   const std::string cameraName = get_node_base_interface()->get_name();
-#ifdef IMAGE_TRANSPORT_SUPPORTS_NODE_INTERFACES
-  imageTransport_ = std::make_shared<ImageTransport>(image_transport::RequiredInterfaces(*this));
+  // Always use the node-interfaces overload: a LifecycleNode has node interfaces.
   infoManager_ = utils::makeCameraInfoManager(
     get_node_base_interface(), get_node_parameters_interface(), get_node_logging_interface(),
     get_node_services_interface(), cameraName, "camerainfo_url", 10);
-#else
-  imageTransport_ =
-    std::make_shared<ImageTransport>(std::shared_ptr<CameraDriver>(this, [](auto *) {}));
-  infoManager_ = utils::makeCameraInfoManager(this, cameraName, "camerainfo_url");
+
+  // The image_transport publisher is only usable on a lifecycle node from
+  // image_transport >= 6.4.0. When available, build the ImageTransport from the
+  // node interfaces and hand it to the Camera. Otherwise leave it null: the
+  // Camera then publishes via plain lifecycle publishers (see Camera::makePublishers).
+  image_transport::ImageTransport * it = nullptr;
+#ifdef USE_IMAGE_TRANSPORT_PUBLISHER
+  imageTransport_ = std::make_shared<ImageTransport>(image_transport::RequiredInterfaces(*this));
+  it = imageTransport_.get();
 #endif
   camera_ = std::make_shared<Camera>(
     get_node_base_interface(), get_node_parameters_interface(), get_node_logging_interface(),
     get_node_timers_interface(), get_node_clock_interface(), get_node_topics_interface(),
-    get_node_services_interface(), imageTransport_.get(), infoManager_.get(), cameraName, "");
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
+    get_node_services_interface(), it, infoManager_.get(), cameraName, "");
+
   get_node_base_interface()->get_context()->add_pre_shutdown_callback(
     std::bind(&CameraDriver::preShutdown, this));
 
@@ -51,10 +55,6 @@ CameraDriver::CameraDriver(const rclcpp::NodeOptions & options) : NodeType("came
       rclcpp_lifecycle::LifecycleNode::activate();
     });
   }
-#else
-  camera_->configure();
-  camera_->activate();
-#endif
 }
 
 CameraDriver::~CameraDriver()
@@ -81,8 +81,6 @@ void CameraDriver::shutdown()
     LOG_INFO("shutdown complete.");
   }
 }
-
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
 
 void CameraDriver::preShutdown() { rclcpp_lifecycle::LifecycleNode::shutdown(); }
 
@@ -130,8 +128,6 @@ CbReturn CameraDriver::on_error(const LCState & state)
   LOG_ERROR("got error state: " << state.label());
   return (CbReturn::FAILURE);
 }
-
-#endif
 
 }  // namespace spinnaker_camera_driver
 

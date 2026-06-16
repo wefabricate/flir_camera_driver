@@ -32,7 +32,7 @@ public:
   using ImageTransport = image_transport::ImageTransport;
   explicit CameraDriver(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~CameraDriver() override;
-#ifdef IMAGE_TRANSPORT_SUPPORTS_LIFECYCLE_NODE
+
 protected:
   void preShutdown();
   CbReturn on_configure(const LCState & state) override;
@@ -57,7 +57,6 @@ protected:
     const bool v = (camera_.get()->*cameraFn)();
     return (v ? CbReturn::SUCCESS : CbReturn::FAILURE);
   }
-#endif
 
 private:
   template <class T>

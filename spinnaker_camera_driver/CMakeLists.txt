@@ -72,6 +72,7 @@ find_package(flir_camera_msgs REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -93,6 +94,7 @@ set(ROS_DEPENDENCIES
   image_transport::image_transport
   rclcpp::rclcpp
   rclcpp_components::component
+  rclcpp_lifecycle::rclcpp_lifecycle
   ${sensor_msgs_TARGETS}
   ${std_msgs_TARGETS})
 

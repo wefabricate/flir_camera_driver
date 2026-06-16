@@ -23,17 +23,14 @@ namespace spinnaker_camera_driver
 {
 namespace utils
 {
-#ifdef IMAGE_TRANSPORT_SUPPORTS_NODE_INTERFACES
+// Node-interfaces overload. The driver is always a lifecycle node, which exposes
+// these interfaces, so this single overload serves both publisher paths.
 std::shared_ptr<camera_info_manager::CameraInfoManager> makeCameraInfoManager(
   const std::shared_ptr<rclcpp::node_interfaces::NodeBaseInterface> &,
   const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface> &,
   const std::shared_ptr<rclcpp::node_interfaces::NodeLoggingInterface> &,
   const std::shared_ptr<rclcpp::node_interfaces::NodeServicesInterface> &,
   const std::string & cameraName, const std::string & urlParameterName, uint32_t qSize);
-#else
-std::shared_ptr<camera_info_manager::CameraInfoManager> makeCameraInfoManager(
-  rclcpp::Node * node, const std::string & cameraName, const std::string & parameterName);
-#endif
 
 }  // namespace utils
 }  // namespace spinnaker_camera_driver

@@ -32,7 +32,6 @@ T safeDeclare(
   }
 }
 
-#ifdef IMAGE_TRANSPORT_SUPPORTS_NODE_INTERFACES
 std::shared_ptr<camera_info_manager::CameraInfoManager> makeCameraInfoManager(
   const std::shared_ptr<rclcpp::node_interfaces::NodeBaseInterface> & bi,
   const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface> & pi,
@@ -41,20 +40,12 @@ std::shared_ptr<camera_info_manager::CameraInfoManager> makeCameraInfoManager(
   const std::string & cameraName, const std::string & urlParameterName, uint32_t qSize)
 {
   const auto calib = safeDeclare<std::string>(pi, urlParameterName, "");
+  // CameraInfoManager's node-interfaces ctor takes an rmw_qos_profile_t (rclcpp::QoS
+  // does not implicitly convert to it), so hand it the underlying profile.
   auto mgr = std::make_shared<camera_info_manager::CameraInfoManager>(
-    bi, si, li, cameraName, calib, rclcpp::QoS(qSize));
+    bi, si, li, cameraName, calib, rclcpp::QoS(qSize).get_rmw_qos_profile());
   return (mgr);
 }
-#else
-std::shared_ptr<camera_info_manager::CameraInfoManager> makeCameraInfoManager(
-  rclcpp::Node * node, const std::string & cameraName, const std::string & parameterName)
-{
-  const auto calib =
-    safeDeclare<std::string>(node->get_node_parameters_interface(), parameterName, "");
-  auto mgr = std::make_shared<camera_info_manager::CameraInfoManager>(node, cameraName, calib);
-  return (mgr);
-}
-#endif
 
 }  // namespace utils
 }  // namespace spinnaker_camera_driver
