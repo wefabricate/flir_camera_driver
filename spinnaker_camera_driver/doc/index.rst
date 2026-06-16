@@ -166,14 +166,24 @@ Behavior:
   (best effort), so a snapshot does not permanently change your streaming
   settings.
 - **Deterministic capture.** The returned frame is one captured strictly *after*
-  the request is applied: a frame-id fence discards frames that were already in
-  flight, and the frame's metadata is then verified, so the result is a fresh,
-  correct-settings frame without disturbing the live stream. If the camera is
-  already in software-trigger mode the snapshot fires one ``trigger_software``
-  command (``AcquisitionControl/TriggerSoftware``) to produce that frame;
-  otherwise (free-running) it takes the next frame. Per-snapshot toggling of the
-  camera's trigger mode on a live stream is intentionally avoided — it proved
-  unreliable in practice.
+  the request is applied. There are three capture paths:
+
+  - *Already in software-trigger mode*: the snapshot fires one ``trigger_software``
+    command (``AcquisitionControl/TriggerSoftware``); the resulting frame is
+    post-settings by construction.
+  - *Free-running, default* (``snapshot_use_trigger`` = false): the live stream is
+    left running and a frame-id fence discards frames already in flight, then the
+    first incoming frame whose metadata matches is accepted ("discard-until-match").
+    The stream is never disturbed.
+  - *Free-running with* ``snapshot_use_trigger`` = true: the snapshot **stops the
+    stream, switches to a software trigger, fires one trigger, captures that single
+    frame, then resumes free-running streaming**. This makes the captured frame
+    fully deterministic (it is the only frame produced between settings and
+    capture) at the cost of ~0.4-0.5 s of GigE acquisition stop/start latency per
+    call and a brief gap in the published stream. The teardown always restores
+    streaming, even on failure. *Note:* per-snapshot toggling of trigger mode on a
+    **live** (still-acquiring) stream is unreliable and is deliberately not done;
+    this path halts acquisition first, which is the reliable way to switch.
 
 Failure contract:
 
@@ -198,7 +208,15 @@ Preconditions:
   is not populated, the driver logs a warning and falls back to write-time
   read-back verification only.
 - ``snapshot_timeout`` (seconds, default 2.0) bounds how long verification waits
-  for a matching frame before failing.
+  for a matching frame before failing. When ``snapshot_use_trigger`` is set, allow
+  a little extra (e.g. 3.0) to cover the acquisition restart.
+- ``snapshot_use_trigger`` (bool, default false) selects the free-running capture
+  strategy: false keeps the stream running (discard-until-match); true stops the
+  stream and captures one software-triggered frame, then resumes (see
+  *Deterministic capture* above). Requires ``trigger_mode``, ``trigger_source`` and
+  ``trigger_software`` to be mapped in the camera config (the ``blackfly_s`` example
+  maps them); if they are not, the driver logs a warning and falls back to
+  discard-until-match.
 
 Example call from the command line::
 
@@ -276,6 +294,11 @@ files*, the driver has the following ROS parameters:
 -  ``snapshot_timeout``: how long [s] the ``~/snapshot`` service waits for a
    frame whose metadata matches the requested exposure/gain before failing.
    Default: 2.0. See `Snapshot service`_.
+-  ``snapshot_use_trigger``: if true, a ``~/snapshot`` on a free-running camera
+   stops the stream, captures one software-triggered frame, then resumes
+   streaming (deterministic, ~0.4-0.5 s/call). If false (default), it keeps
+   streaming and returns the first matching frame. Default: false. See
+   `Snapshot service`_.
 -  ``use_ieee_1588``: use PTP (IEEE 1588) to set the ``header.stamp`` time
    stamp instead of system time. Note that you will still need to enable
    IEEE 1588 at the camera level, and enable time stamp "chunks". Default: false.

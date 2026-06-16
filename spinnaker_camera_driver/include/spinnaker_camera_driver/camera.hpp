@@ -120,6 +120,16 @@ private:
   void snapshotCallback(
     const std::shared_ptr<flir_camera_msgs::srv::Snapshot::Request> req,
     std::shared_ptr<flir_camera_msgs::srv::Snapshot::Response> res);
+  // Stops the live stream, switches to a software trigger, fires one trigger,
+  // returns the captured (verified) frame, then restores free-running streaming.
+  // Guarantees the camera is streaming again on return. Sets *ok=false on any
+  // hard failure; *metaMissing if the returned frame lacked chunk metadata.
+  ImageConstPtr captureViaStopTrigger(
+    const std::shared_ptr<spinnaker_camera_driver::SpinnakerWrapper> & wrapper,
+    const std::string & tmNode, const std::string & triggerSoftwareNode,
+    const std::string & triggerSourceNode, const std::string & triggerSelectorNode,
+    bool wantExposure, double appliedExposure, bool wantGain, double appliedGain,
+    bool * metaMissing, bool * ok);
   std::string mappedNode(const std::string & paramName) const;
   void updateStatus();
   void checkSubscriptions();
@@ -221,6 +231,12 @@ private:
   size_t maxBufferQueueSize_{4};
   // ----- snapshot service -----
   double snapshotTimeout_{2.0};   // [s] verification wait budget
+  // When true, a snapshot on a free-running camera STOPS the stream, switches to
+  // a software trigger, captures one triggered frame, then resumes streaming
+  // (deterministic, but ~0.4-0.5s of GigE stop/start latency per call). When
+  // false (default), the snapshot keeps streaming and accepts the first incoming
+  // frame whose metadata matches the request (discard-until-match).
+  bool snapshotUseTrigger_{false};
   std::mutex snapshotCallMutex_;  // serializes concurrent ~/snapshot calls
   // capture state below is guarded by mutex_ and signalled via snapshotCv_
   std::condition_variable snapshotCv_;

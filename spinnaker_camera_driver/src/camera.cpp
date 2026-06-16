@@ -441,6 +441,7 @@ void Camera::readParameters()
   streamOnlyWhileSubscribed_ = safe_declare<bool>(prefix_ + "connect_while_subscribed", false);
   enableExternalControl_ = safe_declare<bool>(prefix_ + "enable_external_control", false);
   snapshotTimeout_ = safe_declare<double>(prefix_ + "snapshot_timeout", 2.0);
+  snapshotUseTrigger_ = safe_declare<bool>(prefix_ + "snapshot_use_trigger", false);
   callbackHandle_ = node_parameters_interface_->add_on_set_parameters_callback(
     std::bind(&Camera::parameterChanged, this, std::placeholders::_1));
   cameraInfoURL_ = safe_declare<std::string>(prefix_ + "camerainfo_url", "");
@@ -833,36 +834,57 @@ void Camera::snapshotCallback(
     ok = false;
   }
 
-  // Determinism comes from the frame-id fence in processImage, not from toggling
-  // trigger mode on a live stream (which proved unreliable). If the camera is
-  // already in trigger mode we fire one software trigger; otherwise we rely on
-  // the free-running stream.
+  // How to capture the snapshot frame:
+  //  - camera ALREADY in trigger mode  -> fire one software trigger (fireTrigger)
+  //  - free-running + snapshot_use_trigger -> STOP the stream, switch to a
+  //    software trigger, fire, capture, then RESUME streaming (stopTriggerResume)
+  //  - free-running otherwise -> keep streaming and accept the first incoming
+  //    frame whose metadata matches the request (frame-id fence in processImage)
   bool fireTrigger = false;
-  std::string triggerSoftwareNode;
+  bool stopTriggerResume = false;
+  std::string tmNode, triggerSoftwareNode, triggerSourceNode, triggerSelectorNode;
   if (ok) {
-    const std::string tmNode = mappedNode("trigger_mode");
+    tmNode = mappedNode("trigger_mode");
+    triggerSoftwareNode = mappedNode("trigger_software");
+    triggerSourceNode = mappedNode("trigger_source");
+    triggerSelectorNode = mappedNode("trigger_selector");
+    bool inTriggerMode = false;
     if (!tmNode.empty()) {
       try {
         std::string tm;
         if (wrapper->getEnum(tmNode, &tm) == "OK" && tm == "On") {
-          fireTrigger = true;
-          triggerSoftwareNode = mappedNode("trigger_software");
-          if (triggerSoftwareNode.empty()) {
-            LOG_ERROR(
-              "snapshot: trigger_mode is On but no trigger_software command node in camera config");
-            ok = false;
-          }
+          inTriggerMode = true;
         }
       } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
         LOG_WARN(
           "snapshot: could not read trigger_mode (" << e.what() << "), assuming free-running");
       }
     }
+    if (inTriggerMode) {
+      fireTrigger = true;
+      if (triggerSoftwareNode.empty()) {
+        LOG_ERROR(
+          "snapshot: trigger_mode is On but no trigger_software command node in camera config");
+        ok = false;
+      }
+    } else if (snapshotUseTrigger_ && cameraStreaming_) {
+      if (tmNode.empty() || triggerSoftwareNode.empty() || triggerSourceNode.empty()) {
+        LOG_WARN(
+          "snapshot: snapshot_use_trigger is set but trigger_mode/trigger_source/trigger_software "
+          "are not all mapped in the camera config; falling back to free-running capture");
+      } else {
+        stopTriggerResume = true;
+      }
+    }
   }
 
   ImageConstPtr matched;
   bool metaMissing = false;
-  if (ok) {
+  if (ok && stopTriggerResume) {
+    matched = captureViaStopTrigger(
+      wrapper, tmNode, triggerSoftwareNode, triggerSourceNode, triggerSelectorNode, wantExposure,
+      appliedExposure, wantGain, appliedGain, &metaMissing, &ok);
+  } else if (ok) {
     {
       std::unique_lock<std::mutex> lock(mutex_);
       bufferQueue_.clear();
@@ -961,6 +983,119 @@ void Camera::snapshotCallback(
       LOG_WARN("snapshot: failed to restore prior settings: " << e.what());
     }
   }
+}
+
+// Stops the live stream, arms a software trigger, fires one trigger, waits for
+// the resulting (post-settings) frame, then ALWAYS restores free-running
+// streaming. Reuses processImage + snapshotCv_ to receive the frame, exactly
+// like the other capture paths. Trigger nodes are only writable while
+// acquisition is stopped, which is why the stream is halted first.
+Camera::ImageConstPtr Camera::captureViaStopTrigger(
+  const std::shared_ptr<spinnaker_camera_driver::SpinnakerWrapper> & wrapper,
+  const std::string & tmNode, const std::string & triggerSoftwareNode,
+  const std::string & triggerSourceNode, const std::string & triggerSelectorNode, bool wantExposure,
+  double appliedExposure, bool wantGain, double appliedGain, bool * metaMissing, bool * ok)
+{
+  ImageConstPtr matched;
+  std::string ret, prevTriggerSource;
+
+  // 1) halt the live stream so the trigger nodes become writable
+  if (!stopStreaming()) {
+    LOG_ERROR("snapshot: could not stop streaming to arm the trigger");
+    *ok = false;
+    return matched;  // still streaming; nothing to tear down
+  }
+
+  // 2) configure a software trigger (acquisition is stopped, so these are writable)
+  bool configured = true;
+  try {
+    wrapper->getEnum(triggerSourceNode, &prevTriggerSource);  // best-effort, to restore later
+    if (!triggerSelectorNode.empty()) {
+      wrapper->setEnum(triggerSelectorNode, "FrameStart", &ret);
+    }
+    if (wrapper->setEnum(triggerSourceNode, "Software", &ret) != "OK" || ret != "Software") {
+      LOG_ERROR("snapshot: could not set trigger_source=Software (got '" << ret << "')");
+      configured = false;
+    }
+    if (configured && (wrapper->setEnum(tmNode, "On", &ret) != "OK" || ret != "On")) {
+      LOG_ERROR("snapshot: could not set trigger_mode=On (got '" << ret << "')");
+      configured = false;
+    }
+  } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+    LOG_ERROR("snapshot: error configuring software trigger: " << e.what());
+    configured = false;
+  }
+
+  if (configured) {
+    // 3) arm. Frame ids restart at 1 on the next BeginAcquisition, so the
+    //    latestFrameId_ fence from the prior stream must be cleared to 0; the
+    //    only frame produced here is the post-trigger (post-settings) one anyway.
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      bufferQueue_.clear();
+      snapshotImage_.reset();
+      snapshotMetaMissing_ = false;
+      snapshotCheckExposure_ = wantExposure;
+      snapshotCheckGain_ = wantGain;
+      snapshotExposure_ = appliedExposure;
+      snapshotGain_ = appliedGain;
+      snapshotArmFrameId_ = 0;
+      snapshotActive_ = true;
+    }
+    // 4) re-start acquisition (continuous + trigger On = one frame per trigger)
+    if (!startStreaming()) {
+      LOG_ERROR("snapshot: could not restart acquisition to capture a trigger");
+      *ok = false;
+    } else {
+      bool fired = false;
+      try {
+        fired = execute(triggerSoftwareNode);
+      } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+        LOG_ERROR("snapshot: software trigger error: " << e.what());
+      }
+      if (!fired) {
+        LOG_ERROR("snapshot: software trigger failed");
+        *ok = false;
+      } else {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto timeout = std::chrono::nanoseconds(static_cast<int64_t>(snapshotTimeout_ * 1e9));
+        snapshotCv_.wait_for(
+          lock, timeout, [this] { return snapshotImage_ != nullptr || !keepRunning_; });
+        matched = snapshotImage_;
+        *metaMissing = snapshotMetaMissing_;
+      }
+    }
+    // 5) disarm
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      snapshotActive_ = false;
+      snapshotCheckExposure_ = false;
+      snapshotCheckGain_ = false;
+      snapshotImage_.reset();
+    }
+  } else {
+    *ok = false;
+  }
+
+  // 6) teardown: ALWAYS return the camera to free-running streaming. stopStreaming
+  //    is a no-op if acquisition never restarted (the config-failed path).
+  stopStreaming();
+  try {
+    if (!tmNode.empty()) {
+      wrapper->setEnum(tmNode, "Off", &ret);
+    }
+    if (
+      !prevTriggerSource.empty() && prevTriggerSource != "Software" && !triggerSourceNode.empty()) {
+      wrapper->setEnum(triggerSourceNode, prevTriggerSource, &ret);
+    }
+  } catch (const spinnaker_camera_driver::SpinnakerWrapper::Exception & e) {
+    LOG_WARN("snapshot: error restoring trigger settings: " << e.what());
+  }
+  if (!startStreaming()) {
+    LOG_ERROR("snapshot: FAILED TO RESUME STREAMING after trigger snapshot");
+    *ok = false;
+  }
+  return matched;
 }
 
 void Camera::processImage(const ImageConstPtr & im)
