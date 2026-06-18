@@ -63,6 +63,12 @@ parameters:
   - name: gain
     type: float
     node: AnalogControl/Gain
+  - name: gamma_enable # must be true for gamma to take effect
+    type: bool
+    node: AnalogControl/GammaEnable
+  - name: gamma
+    type: float
+    node: AnalogControl/Gamma
   #
   # -------- device link throughput limiting
   #
