@@ -240,8 +240,8 @@ Example call from the command line::
    ros2 service call /flir_camera/snapshot flir_camera_msgs/srv/Snapshot \
        "{exposure_time: 5000.0, gain: 2.0}"
 
-A Python example client that also saves the returned image to disk is provided
-at ``scripts/snapshot_client.py``.
+A minimal Python client can call this service with ``rclpy`` and
+``flir_camera_msgs/srv/Snapshot`` and save the returned image to disk.
 
 Parameters
 ----------
