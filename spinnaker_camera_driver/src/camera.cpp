@@ -283,13 +283,13 @@ void Camera::startTimers()
       std::bind(&Camera::checkSubscriptions, this));
   }
 
-  if (runStatusTimer_) {
+  if (runStatusTimer_ && statusInterval_ > 0) {
     if (statusTimer_) {
       statusTimer_->cancel();
     }
     statusTimer_ = rclcpp::create_timer(
-      node_base_interface_, node_timers_interface_, clock(), rclcpp::Duration(5, 0),
-      std::bind(&Camera::updateStatus, this));
+      node_base_interface_, node_timers_interface_, clock(),
+      rclcpp::Duration::from_seconds(statusInterval_), std::bind(&Camera::updateStatus, this));
   }
 }
 
@@ -490,6 +490,7 @@ void Camera::readParameters()
   maxBufferQueueSize_ = static_cast<size_t>(safe_declare<int>(prefix_ + "buffer_queue_size", 4));
   computeBrightness_ = safe_declare<bool>(prefix_ + "compute_brightness", false);
   acquisitionTimeout_ = safe_declare<double>(prefix_ + "acquisition_timeout", 3.0);
+  statusInterval_ = safe_declare<double>(prefix_ + "status_interval", 5.0);
   parameterFile_ = safe_declare<std::string>(prefix_ + "parameter_file", "parameters.yaml");
   streamOnlyWhileSubscribed_ = safe_declare<bool>(prefix_ + "connect_while_subscribed", false);
   enableExternalControl_ = safe_declare<bool>(prefix_ + "enable_external_control", false);

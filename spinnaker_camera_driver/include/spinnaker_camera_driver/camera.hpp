@@ -278,6 +278,7 @@ private:
   std::shared_ptr<ExposureController> exposureController_;
   bool firstSynchronizedFrame_{true};
   bool runStatusTimer_{false};
+  double statusInterval_{5.0};  // status log period [s]; <= 0 disables the status log
   // --------- related to diagnostics
   std::shared_ptr<diagnostic_updater::Updater> updater_;
   std::shared_ptr<diagnostic_updater::TopicDiagnostic> topicDiagnostic_;

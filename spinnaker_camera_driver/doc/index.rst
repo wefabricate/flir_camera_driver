@@ -318,6 +318,12 @@ files*, the driver has the following ROS parameters:
    streaming (deterministic, ~0.4-0.5 s/call). If false (default), it keeps
    streaming and returns the first matching frame. Default: false. See
    `Snapshot service`_.
+-  ``status_interval``: period [s] of the periodic ``IN/OUT/drop`` rate
+   status log line. Set to ``0`` (or negative) to disable the status log
+   entirely. Default: 5.0. Note: when frames are incomplete/skipped or the
+   PTP offset is out of range the line is logged at ``warning`` severity, so
+   raising the node's log level to ``WARN`` suppresses the routine line while
+   still surfacing problems.
 -  ``use_ieee_1588``: use PTP (IEEE 1588) to set the ``header.stamp`` time
    stamp instead of system time. Note that you will still need to enable
    IEEE 1588 at the camera level, and enable time stamp "chunks". Default: false.
