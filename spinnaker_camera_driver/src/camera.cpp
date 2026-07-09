@@ -181,9 +181,7 @@ bool Camera::configure()
     // Some parameters (like blackfly s chunk control) cannot be set once
     // the camera is running.
     createCameraParameters();
-    // Runs after createCameraParameters() (which pushes balance_white_auto, if
-    // configured) so a manually fixed ratio isn't immediately overwritten by
-    // an auto algorithm that's still active.
+    // after createCameraParameters() so this overrides balance_white_auto if both are set
     applyFixedBalanceRatios();
     makeSubscribers();
   } catch (const std::exception & e) {
