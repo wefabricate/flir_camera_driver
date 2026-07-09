@@ -181,6 +181,10 @@ bool Camera::configure()
     // Some parameters (like blackfly s chunk control) cannot be set once
     // the camera is running.
     createCameraParameters();
+    // Runs after createCameraParameters() (which pushes balance_white_auto, if
+    // configured) so a manually fixed ratio isn't immediately overwritten by
+    // an auto algorithm that's still active.
+    applyFixedBalanceRatios();
     makeSubscribers();
   } catch (const std::exception & e) {
     LOG_ERROR("configure() failed: " << e.what());
@@ -497,6 +501,10 @@ void Camera::readParameters()
   enableExternalControl_ = safe_declare<bool>(prefix_ + "enable_external_control", false);
   snapshotTimeout_ = safe_declare<double>(prefix_ + "snapshot_timeout", 2.0);
   snapshotUseTrigger_ = safe_declare<bool>(prefix_ + "snapshot_use_trigger", false);
+  balanceRatioRed_ =
+    safe_declare<double>(prefix_ + "balance_ratio_red", std::numeric_limits<double>::quiet_NaN());
+  balanceRatioBlue_ =
+    safe_declare<double>(prefix_ + "balance_ratio_blue", std::numeric_limits<double>::quiet_NaN());
   callbackHandle_ = node_parameters_interface_->add_on_set_parameters_callback(
     std::bind(&Camera::parameterChanged, this, std::placeholders::_1));
   cameraInfoURL_ = safe_declare<std::string>(prefix_ + "camerainfo_url", "");
@@ -635,6 +643,30 @@ bool Camera::execute(const std::string & nodeName)
   }
 
   return true;
+}
+
+void Camera::setBalanceRatio(const std::string & channel, double value)
+{
+  const std::string selNode = mappedNode(prefix_ + "balance_ratio_selector");
+  const std::string ratioNode = mappedNode(prefix_ + "balance_ratio");
+  if (selNode.empty() || ratioNode.empty()) {
+    LOG_WARN(
+      "balance_ratio_selector/balance_ratio missing from camera config; cannot set fixed "
+      << channel << " balance ratio");
+    return;
+  }
+  setEnum(selNode, channel);
+  setDouble(ratioNode, value);
+}
+
+void Camera::applyFixedBalanceRatios()
+{
+  if (!std::isnan(balanceRatioRed_)) {
+    setBalanceRatio("Red", balanceRatioRed_);
+  }
+  if (!std::isnan(balanceRatioBlue_)) {
+    setBalanceRatio("Blue", balanceRatioBlue_);
+  }
 }
 
 void Camera::setParameter(const NodeInfo & ni, const rclcpp::Parameter & p)

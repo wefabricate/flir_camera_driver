@@ -99,6 +99,15 @@ private:
   bool setInt(const std::string & nodeName, int v);
   bool setBool(const std::string & nodeName, bool v);
   bool execute(const std::string & nodeName);
+  // Selects the Red/Blue channel then writes its BalanceRatio -- the two must
+  // happen as an immediate select-then-write pair (see balanceRatioRed_ comment).
+  void setBalanceRatio(const std::string & channel, double value);
+  // Pushes balanceRatioRed_/balanceRatioBlue_ to the camera, for whichever of
+  // the two is configured (non-NaN). Call after openDevice() on every
+  // configure() so a fixed color balance survives a driver restart even when
+  // there isn't enough streaming time for BalanceWhiteAuto=Continuous to
+  // reconverge on its own.
+  void applyFixedBalanceRatios();
   bool readParameterDefinitionFile();
   void startDiagnostics();
   void stopDiagnostics();
@@ -231,6 +240,13 @@ private:
   double averageTimeDifference_{std::numeric_limits<double>::quiet_NaN()};
   int64_t baseTimeOffset_{0};
   float currentGain_{std::numeric_limits<float>::lowest()};
+  // Fixed per-channel BalanceRatio overrides, applied on every configure() (see
+  // applyFixedBalanceRatios()). NaN means "not configured" -- leave that channel
+  // alone. Needed because BalanceRatioSelector/BalanceRatio address Red and Blue
+  // through one shared selector+value register pair, so a single yaml-mapped
+  // balance_ratio parameter can only ever drive one of the two channels.
+  double balanceRatioRed_{std::numeric_limits<double>::quiet_NaN()};
+  double balanceRatioBlue_{std::numeric_limits<double>::quiet_NaN()};
   std::shared_ptr<spinnaker_camera_driver::SpinnakerWrapper> wrapper_;
   sensor_msgs::msg::Image imageMsg_;
   sensor_msgs::msg::CameraInfo cameraInfoMsg_;

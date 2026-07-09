@@ -69,6 +69,15 @@ parameters:
   - name: gamma
     type: float
     node: AnalogControl/Gamma
+  - name: balance_ratio_selector # "Red", "Blue"
+    type: enum
+    node: AnalogControl/BalanceRatioSelector
+  - name: balance_ratio
+    type: float
+    node: AnalogControl/BalanceRatio
+  - name: balance_white_auto # "Continuous", "Once", "Off"
+    type: enum
+    node: AnalogControl/BalanceWhiteAuto
   #
   # -------- device link throughput limiting
   #
