@@ -99,6 +99,10 @@ private:
   bool setInt(const std::string & nodeName, int v);
   bool setBool(const std::string & nodeName, bool v);
   bool execute(const std::string & nodeName);
+  // selects the Red/Blue channel, then writes its BalanceRatio
+  void setBalanceRatio(const std::string & channel, double value);
+  // pushes balanceRatioRed_/balanceRatioBlue_ (if configured) on every configure()
+  void applyFixedBalanceRatios();
   bool readParameterDefinitionFile();
   void startDiagnostics();
   void stopDiagnostics();
@@ -231,6 +235,9 @@ private:
   double averageTimeDifference_{std::numeric_limits<double>::quiet_NaN()};
   int64_t baseTimeOffset_{0};
   float currentGain_{std::numeric_limits<float>::lowest()};
+  // fixed BalanceRatio overrides, NaN = not configured
+  double balanceRatioRed_{std::numeric_limits<double>::quiet_NaN()};
+  double balanceRatioBlue_{std::numeric_limits<double>::quiet_NaN()};
   std::shared_ptr<spinnaker_camera_driver::SpinnakerWrapper> wrapper_;
   sensor_msgs::msg::Image imageMsg_;
   sensor_msgs::msg::CameraInfo cameraInfoMsg_;
